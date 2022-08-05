@@ -1,35 +1,1001 @@
 #!/usr/bin/env bash
-set -e
+################################################################################
+################################################################################
+####### Migrate collaborator permissions from repos ##############################
+################################################################################
+################################################################################
+#
+# This will migrate repository collaborators with permissions
 
-echo "Hello gh-migrate-collaborator-permission!"
+# PREREQS:
+# TO DO
 
-# Snippets to help get started:
+set -e 
 
-# Determine if an executable is in the PATH
-# if ! type -p ruby >/dev/null; then
-#   echo "Ruby not found on the system" >&2
-#   exit 1
-# fi
+function calculateTotalPagination() {
+    local NUM_PAGES=$(expr $2 / $1)
+    if [ $(expr $2 % $1) -gt 0 ];
+    then
+        NUM_PAGES=$((NUM_PAGES+1))
+    fi
+    echo "$NUM_PAGES"
+}
 
-# Pass arguments through to another command
-# gh issue list "$@" -R cli/cli
+function checkTerminationConditionRepoLoop() {
+    local CONTINUE_EXECUTION=$REQUIRED_PAGES_REPOS
+    echo "$CONTINUE_EXECUTION"
+}
 
-# Using the gh api command to retrieve and format information
-# QUERY='
-#   query($endCursor: String) {
-#     viewer {
-#       repositories(first: 100, after: $endCursor) {
-#         nodes {
-#           nameWithOwner
-#           stargazerCount
-#         }
-#       }
-#     }
-#   }
-# '
-# TEMPLATE='
-#   {{- range $repo := .data.viewer.repositories.nodes -}}
-#     {{- printf "name: %s - stargazers: %v\n" $repo.nameWithOwner $repo.stargazerCount -}}
-#   {{- end -}}
-# '
-# exec gh api graphql -f query="${QUERY}" --paginate --template="${TEMPLATE}"
+function checkTerminationConditionCollabLoop() {
+    local CONTINUE_EXECUTION=$REQUIRED_PAGES_COLLABS
+    echo "$CONTINUE_EXECUTION"
+}
+
+################################################################################
+#### Function calculate_permission ##################################################
+function calculate_permission() {
+  local permission_team="pull"
+
+  if [ "$1" == "ADMIN" ]; then
+    permission_team="admin"
+  elif [ "$1" == "MAINTAIN" ]; then
+    permission_team="maintain"
+  elif [ "$1" ==  "WRITE" ]; then
+    permission_team="push"
+  elif [ "$1" == "TRIAGE" ]; then
+    permission_team="triage"
+  elif [ "$1" == "READ" ]; then
+    permission_team="pull"
+  else
+   permission_team="pull"
+  fi
+
+  echo "$permission_team"
+}
+
+################################################################################
+#### Function PrintUsage #######################################################
+PrintUsage() {
+    cat <<EOM
+Usage: gh migrate-collaborator-permission [options]
+Options:
+    -h, --help                    : Show script help
+    -su, --source-url             : Set source GitHub URL (e.g. https://github.example.com) Looks for SOURCE_URL environment
+                                    variable if omitted or defaults to https://github.com
+    -du, --destination-url        : Set destination GitHub URL (e.g. https://github.example.com) Looks for DEST_URL environment
+                                    variable if omitted or defaults to https://github.com                                 
+    -st, --source-token           : Set Personal Access Token for source organization with repo scope - Looks for GH_TOKEN_SOURCE environment
+                                    variable if omitted
+    -dt, --destination-token      : Set Personal Access Token for destination organization with repo scope - Looks for GH_TOKEN_DEST environment
+                                    variable if omitted
+    -so, --source-org             : Set source organization to migrate from - Looks for SOURCE_ORG environment
+                                    variable if omitted
+    -do, --destination-org        : Set destination organization to migrate to - Looks for DEST_ORG environment
+                                    variable if omitted
+Description:
+gh migrate-collaborator-permission migrates the collaborator repository permissions from one organzation to another organization, assuming that the repositories exist on both sides
+Example:
+  gh migrate-collaborator-permission -su https://ghes-url.com -st ABCDEFG1234567 -so source-org -do final-destination-org -dt ABCDEFG1234567
+EOM
+  exit 0
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+  --verbose)
+    verbose=1
+    ;;
+  -su|--source-url)
+    SOURCE_URL=$2
+    shift
+    ;;
+  -du|--destination-url)
+    DEST_URL=$2
+    shift;
+    ;;
+  -st|--source-token)
+   GH_TOKEN_SOURCE=$2
+   shift
+   ;;
+  -dt|--destination-token)
+   GH_TOKEN_DEST=$2
+   shift
+   ;;
+  -so|--source-org)
+   SOURCE_ORG=$2
+   shift
+   ;;
+  -do|--destination-org)
+   DEST_ORG=$2
+   shift
+   ;;
+  -h|--help)
+    PrintUsage
+    ;;
+  esac
+  shift
+done
+
+#####################################################################
+#### Function GraphicArt ################################################
+GraphicArt() {
+  echo ""
+  echo "##############################################################"
+  echo "         GitHub Team Repo Permission Migration                "
+  cat << "EOF"
+.------------------------------------------------------------------------------.
+|                             .mmMMMMMMMMMMMMMmm.                              |
+|                         .mMMMMMMMMMMMMMMMMMMMMMMMm.                          |
+|                      .mMMMMMMMMMMMMMMMMMMMMMMMMMMMMMm.                       |
+|                    .MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM.                     |
+|                  .MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM.                   |
+|                 MMMMMMMM'  `"MMMMM"""""""MMMM""`  'MMMMMMMM                  |
+|                MMMMMMMMM                           MMMMMMMMM                 |
+|               MMMMMMMMMM:                         :MMMMMMMMMM                |
+|              .MMMMMMMMMM                           MMMMMMMMMM.               |
+|              MMMMMMMMM"                             "MMMMMMMMM               |
+|              MMMMMMMMM                               MMMMMMMMM               |
+|              MMMMMMMMM                               MMMMMMMMM               |
+|              MMMMMMMMMM                             MMMMMMMMMM               |
+|              `MMMMMMMMMM                           MMMMMMMMMM`               |
+|               MMMMMMMMMMMM.                     .MMMMMMMMMMMM                |
+|                MMMMMM  MMMMMMMMMM         MMMMMMMMMMMMMMMMMM                 |
+|                 MMMMMM  'MMMMMMM           MMMMMMMMMMMMMMMM                  |
+|                  `MMMMMM  "MMMMM           MMMMMMMMMMMMMM`                   |
+|                    `MMMMMm                 MMMMMMMMMMMM`                     |
+|                      `"MMMMMMMMM           MMMMMMMMM"`                       |
+|                         `"MMMMMM           MMMMMM"`                          |
+|                             `""M           M""`                              |
+'------------------------------------------------------------------------------'
+EOF
+}
+
+################################################################################
+#### Function GenerateLogFile ####################################################
+GenerateLogFile() {
+  echo ""
+  echo "######################################################################################"
+  echo "This will generate a log name that is going to be used to record logging"
+  echo "######################################################################################"
+
+  ##########################
+  # Get current date stamp #
+  ##########################
+  # Get datestring YYYYMMDDHHMM
+  DATE=$(date +%Y%m%d%H%M)
+
+  ####################
+  # Create File Name #
+  ####################
+  # Example: MyOrg-all_repos-201901041059.csv
+  LOG_FILE_NAME="log-$DATE.txt"
+
+  echo ""
+  echo "Your log output file name: $LOG_FILE_NAME"
+
+  #############################
+  # Create Header in the file #
+  #############################
+  echo ""
+  echo "Creating log file header..."
+
+  # File format headers: 
+  echo "==================================================" >> "${LOG_FILE_NAME}" 2>&1
+  echo "========== Logging ===============================" >> "${LOG_FILE_NAME}" 2>&1
+  echo "===================================================" >> "${LOG_FILE_NAME}" 2>&1
+  echo "" >> "${LOG_FILE_NAME}" 2>&1
+
+  #######################
+  # Load the error code #
+  #######################
+  ERROR_CODE=$?
+
+  ##############################
+  # Check the shell for errors #
+  ##############################
+  if [ ${ERROR_CODE} -ne 0 ]; then
+    echo "ERROR! Failed to write headers to file:[${LOG_FILE_NAME}]!"
+    exit 1
+  fi
+
+  echo ""
+  echo "Done with creating a new log file named \"$LOG_FILE_NAME\""
+
+}
+
+####################################################################
+### Funtion AskForPhase ############################################
+AskForPhase() {
+  echo ""
+  echo "#####################################################################"
+  echo "Check with user to decide whether to start with migration process"
+  echo "#####################################################################"
+
+  CONFIRM_CREATING_MIGRATION_FILE="y"
+
+  echo ""
+  echo "------------------------------------"
+  echo "Do you want to start from beginning by creating a source migration file?"
+  echo "Type [y] if you want to start from beginning or [n] if you have a migration file already and want to move to migration to destination."
+  echo "Followed with the [Enter] key."
+
+  ########################
+  # Read input from user #
+  #######################
+  read -r CONFIRM_CREATING_MIGRATION_FILE
+
+}
+
+####################################################################
+### Funtion AskForPagination ############################################
+AskForPagination() {
+  echo ""
+  echo "#########################################################################"
+  echo "Check with user to decide whether they want to change default pagination"
+  echo "#########################################################################"
+
+  CONFIRM_CHANGE_PAGINATION="y"
+
+  echo ""
+  echo "------------------------------------"
+  echo "If you have a lot of Teams and/or repositories, pagination is required since it can fetch maximum of 100 per time."
+  echo "Currently, Repository pagination is set at [$REPO_PAGINATION] and Collaborator pagination is set at [$COLLABORATOR_PAGINATION]"
+  echo "Type [y] if you want to change those values or [n] if you want to leave as those default values."
+  echo "Followed with the [Enter] key."
+
+  ########################
+  # Read input from user #
+  #######################
+  read -r CONFIRM_CHANGE_PAGINATION
+
+  if [[ "${CONFIRM_CHANGE_PAGINATION}" == 'y' ]]; then
+    echo ""
+    echo "You choose to change default pagination values."
+
+    CONFIRM_HAPPY_WITH_PAGINATION="n"
+
+    while [ "${CONFIRM_HAPPY_WITH_PAGINATION}" != "y" ]; do
+      echo "Please type in value for your Repository pagination. It has to be between 1 to 100"
+      echo "Followed with the [Enter] key."
+      read -r REPO_PAGINATION
+
+      while [ "$REPO_PAGINATION" -gt 100 ] || [ "$REPO_PAGINATION" -lt 1 ]; do
+        echo ""
+        echo "Your Repository pagination value has to be between 1 to 100! Please try it again."
+        echo "Please type in value for your Repository pagination. It has to be between 1 to 100"
+        echo "Followed with the [Enter] key."
+        read -r REPO_PAGINATION
+      done
+
+      echo "Now, type in value for your collaborator pagination. It has to be between 1 to 100"
+      echo "Followed with the [Enter] key."
+      read -r COLLABORATOR_PAGINATION
+
+      while [ "$COLLABORATOR_PAGINATION" -gt 100 ] || [ "$COLLABORATOR_PAGINATION" -lt 1 ]; do
+        echo ""
+        echo "Your Collaborator pagination value has to be between 1 to 100! Please try it again."
+        echo "Please type in value for your Collaborator pagination. It has to be between 1 to 100"
+        echo "Followed with the [Enter] key."
+        read -r COLLABORATOR_PAGINATION
+      done
+
+      echo "Repository Pagination:[${TEAM_PAGINATION}] Collaborator Pagination [${COLLABORATOR_PAGINATION}]"
+      echo "Are your pagination values correct?"
+      echo "Type [y] for yes and [n] for no."
+      echo "Followed with the [Enter] key."
+
+      read -r CONFIRM_HAPPY_WITH_PAGINATION
+    done
+
+    echo "Awesome. We will proceed with those pagination values."
+  else
+    echo ""
+    echo "Thank you. We will proceed with default pagination values."
+  fi
+
+}
+
+####################################################################
+### Funtion GetGHEURLSource ##############################################
+GetGHEURLSource() {
+  echo ""
+  echo "#########################################################################"
+  echo "Need to check whether source GitHub organization is in GitHub.com or GHES"
+  echo "#########################################################################"
+   #####################################
+   # Check if we have a source url set #
+   #####################################
+   if [[ -z ${SOURCE_URL} ]]; then
+     ########################################
+     # Get the GitHub Personal Access Token #
+     #######################################
+     echo ""
+     echo "------------------------------------"
+     echo "Is your source oranization in GHES?"
+     echo "Type [y] for yes and [n] for no."
+     echo "Followed with the [Enter] key."
+     ########################
+     # Read input from user #
+     #######################
+     read -r CONFIRM_SOURCE_URL
+
+     if [[ "${CONFIRM_SOURCE_URL}" == 'y' ]]; then
+       CONFIRM_CORRECT_GHES_SOURCE="n"
+
+       while [ "${CONFIRM_CORRECT_GHES_SOURCE}" != "y" ]; do
+         echo "Please type in your GHES URL (e.g. https://ghes-url.com)"
+         echo "Followed with the [Enter] key."
+         read -r SOURCE_URL
+
+         echo "GHES URL:[${SOURCE_URL}]"
+         echo "Is your GHES URL to migrate from correct?"
+         echo "Type [y] for yes and [n] for no."
+         echo "Followed with the [Enter] key."
+
+         read -r CONFIRM_CORRECT_GHES_SOURCE
+        done
+    else
+      echo "Alright. We will use GHEC API for your source instance"
+      SOURCE_URL=https://github.com
+    fi
+   fi
+
+  ############################################
+  # Clean any whitespace that may be entered #
+  ############################################
+  SOURCE_URL_NO_WHITESPACE="$(echo -e "${SOURCE_URL}" | tr -d '[:space:]')"
+  SOURCE_URL=$SOURCE_URL_NO_WHITESPACE
+
+  if [[ "${SOURCE_URL}" == "https://github.com" ]]; then
+    SOURCE_API_URL="https://api.github.com"
+    SOURCE_GRAPHQL_API_URL="$SOURCE_API_URL/graphql"
+  else
+    SOURCE_API_URL="${SOURCE_URL}/api/v3"
+    SOURCE_GRAPHQL_API_URL="$SOURCE_API_URL/graphql"
+  fi
+
+    echo ""
+    echo "SOURCE  URL: $SOURCE_URL"
+    echo "SOURCE API URL: $SOURCE_API_URL"
+    echo "SOURCE GraphQL API URL: $SOURCE_GRAPHQL_API_URL"
+}
+
+###############################################################################
+### Funtion GetGHEURLDestination ##############################################
+GetGHEURLDestination() {
+  echo ""
+  echo "##############################################################################"
+  echo "Need to check whether destination GitHub organization is in GitHub.com or GHES"
+  echo "##############################################################################"
+
+    #####################################
+   # Check if we have a destination url set #
+   #####################################
+   if [[ -z ${DEST_URL} ]]; then
+     ########################################
+     # Get the GitHub Personal Access Token #
+     #######################################
+     echo ""
+     echo "------------------------------------"
+     echo "Is your destination oranization in GHES?"
+     echo "Type [y] for yes and [n] for no."
+     echo "Followed with the [Enter] key."
+     ########################
+     # Read input from user #
+     #######################
+     read -r CONFIRM_URL_DEST
+
+     if [[ "${CONFIRM_URL_DEST}" == 'y' ]]; then
+       CONFIRM_CORRECT_GHES_DEST="n"
+
+       while [ "${CONFIRM_CORRECT_GHES_DEST}" != "y" ]; do
+         echo "Please type in your GHES URL (e.g. https://ghes-url.com)"
+         echo "Followed with the [Enter] key."
+         read -r DEST_URL
+
+         echo "GHES URL:[${DEST_URL}]"
+         echo "Is your GHES URL to migrate to correct?"
+         echo "Type [y] for yes and [n] for no."
+         echo "Followed with the [Enter] key."
+
+         read -r CONFIRM_CORRECT_GHES_DEST
+        done
+    else
+      echo "Alright. We will use GHEC API for your destination instance"
+      DEST_URL=https://github.com
+    fi
+   fi
+
+    ############################################
+    # Clean any whitespace that may be entered #
+    ############################################
+    DEST_URL_NO_WHITESPACE="$(echo -e "${DEST_URL}" | tr -d '[:space:]')"
+    DEST_URL=$DEST_URL_NO_WHITESPACE
+
+    if [[ "${DEST_URL}" == "https://github.com" ]]; then
+      DEST_API_URL="https://api.github.com"
+    else
+      DEST_API_URL="${DEST_URL}/api/v3"
+    fi
+
+    echo ""
+    echo "DEST  URL: $DEST_URL"
+    echo "DEST API URL: $DEST_API_URL"
+}
+
+####################################################################
+### Funtion GetPersonalAccessTokenSource ################################
+GetPersonalAccessTokenSource() {
+   ############################
+   # Check if we have a source token #
+   ############################
+   if [[ -z ${GH_TOKEN_SOURCE} ]]; then
+     ########################################
+     # Get the GitHub Personal Access Token #
+     #######################################
+     echo ""
+     echo "------------------------------------"
+     echo "Please create a GitHub Personal Access token used to gather"
+     echo "information from your source organization, with a scope of all 'repo' and 'admin:org' permission"
+     echo "followed by [ENTER]:"
+     echo "(note: your input will NOT be displayed)"
+     ########################
+     # Read input from user #
+     #######################
+     read -rs GH_TOKEN_SOURCE
+   fi
+     # Clean any white space that may be entered
+     GH_TOKEN_SOURCE_NO_WHITESPACE="$(echo -e "${GH_TOKEN_SOURCE}" | tr -d '[:space:]')"
+     GH_TOKEN_SOURCE="${GH_TOKEN_SOURCE_NO_WHITESPACE}"
+
+     ##########################################
+     # Check the length of the PAT for sanity #
+     ##########################################
+     if [ ${#GH_TOKEN_SOURCE} -ne 40 ]; then
+       echo "GitHub PAT are 40 characters in length! Your source PAT has ${#GH_TOKEN_SOURCE} characters!"
+       echo "GitHub PAT are 40 characters in length! Your source PAT has ${#GH_TOKEN_SOURCE} characters!" >> "$LOG_FILE_NAME"
+       exit 1
+     fi
+
+}
+
+####################################################################
+### Funtion GetPersonalAccessTokenDestination ################################
+GetPersonalAccessTokenDestination() {
+  ############################
+   # Check if we have a destination token #
+   ############################
+   if [[ -z ${GH_TOKEN_DEST} ]]; then
+     ########################################
+     # Get the GitHub Personal Access Token #
+     #######################################
+     echo ""
+     echo "------------------------------------"
+     echo "Please create a GitHub Personal Access token used to gather"
+     echo "information from your destination organization, with a scope of all 'repo' and 'admin:org' permission"
+     echo "followed by [ENTER]:"
+     echo "(note: your input will NOT be displayed)"
+     ########################
+     # Read input from user #
+     #######################
+     read -rs GH_TOKEN_DEST
+   fi
+
+     ##########################################
+     # Check the length of the PAT for sanity #
+     ##########################################
+     if [ ${#GH_TOKEN_DEST} -ne 40 ]; then
+       echo "GitHub PAT are 40 characters in length! Your destination PAT has ${#GH_TOKEN_DEST} characters!"
+       echo "GitHub PAT are 40 characters in length! Your destination PAT has ${#GH_TOKEN_DEST} characters!" >> "$LOG_FILE_NAME"
+       exit 1
+     fi
+}
+
+####################################################################
+### Funtion GetOrganizations ################################
+GetOrganizations() {
+  ###########################
+  # Check source org or input file #
+  ###########################
+  if [[ -z ${SOURCE_ORG} ]]; then
+    ###########################################
+    # Get the name of the GitHub soure Organization #
+    ###########################################
+    echo ""
+    echo "------------------------------------------------------"
+    echo "Please enter name of the source GitHub Organization you want to migrate from"
+    echo "gather information from, followed by [ENTER]:"
+    ########################
+    # Read input from user #
+    ########################
+    read -r SOURCE_ORG
+
+    # Clean any whitespace that may be enetered
+    SOURCE_ORG_NAME_NO_WHITESPACE="$(echo -e "${SOURCE_ORG}" | tr -d '[:space:]')"
+    SOURCE_ORG="${SOURCE_ORG_NAME_NO_WHITESPACE}"
+
+    #########################
+    # Validate the Org Name #
+    #########################
+    if [ ${#SOURCE_ORG} -le 1 ]; then
+      echo "Error! You must give a valid source Organization name!"
+      echo "Error! You must give a valid source Organization name!">> "$LOG_FILE_NAME"
+      exit 1
+    fi
+  fi
+
+  ###########################
+  # Check destination org or input file #
+  ###########################
+  if [[ -z ${DEST_ORG} ]]; then
+    ###########################################
+    # Get the name of the GitHub destination Organization #
+    ###########################################
+    echo ""
+    echo "------------------------------------------------------"
+    echo "Please enter name of the destination GitHub Organization you want to migrate to"
+    echo "gather information from, followed by [ENTER]:"
+    ########################
+    # Read input from user #
+    ########################
+    read -r DEST_ORG
+
+    # Clean any whitespace that may be enetered
+    DEST_ORG_NAME_NO_WHITESPACE="$(echo -e "${DEST_ORG}" | tr -d '[:space:]')"
+    DEST_ORG="${DEST_ORG_NAME_NO_WHITESPACE}"
+
+    #########################
+    # Validate the Org Name #
+    #########################
+    if [ ${#DEST_ORG} -le 1 ]; then
+      echo "Error! You must give a valid destination Organization name!"
+      echo "Error! You must give a valid destination Organization name!">> "$LOG_FILE_NAME"
+      exit 1
+    fi
+  fi
+}
+
+#####################################################################
+##### Function CheckAPILimitSource ########################################
+CheckAPILimitSource() {
+  ##############################################################
+  # Check what is remaining in source PAT, and if 0, we need to sleep it off #
+  ##############################################################
+  API_RATE_LIMIT_SOURCE=$(curl -s -X GET \
+  --url "${SOURCE_API_URL}/rate_limit" \
+  -H "Authorization: Bearer ${GH_TOKEN_SOURCE}" | jq -r '.' 2>&1)
+
+  # Check the presence whether of API Rate limiting is disabled (only for GHES):
+  API_REMAINING_MESSAGE_SOURCE=$(echo "${API_RATE_LIMIT_SOURCE}" \
+  | jq -r '.message' 2>&1)
+
+  if [[ "${API_REMAINING_MESSAGE_SOURCE}" != "Rate limiting is not enabled." ]]; then
+    # CORE API RATE LIMITs:
+    API_CORE_LIMIT_SOURCE=$(echo "${API_RATE_LIMIT_SOURCE}" \
+    | jq -r '.resources.core.limit' 2>&1)
+    
+    API_CORE_USED_SOURCE=$(echo "${API_RATE_LIMIT_SOURCE}" \
+    | jq -r '.resources.core.used' 2>&1)
+
+    API_CORE_REMAINING_SOURCE=$(echo "${API_RATE_LIMIT_SOURCE}" \
+    | jq -r '.resources.core.remaining' 2>&1)
+
+    # GraphQL API RATE LIMITs:
+    API_GRAPHQL_LIMIT_SOURCE=$(echo "${API_RATE_LIMIT_SOURCE}" \
+    | jq -r '.resources.graphql.limit' 2>&1)
+
+    API_GRAPHQL_USED_SOURCE=$(echo "${API_RATE_LIMIT_SOURCE}" \
+    | jq -r '.resources.graphql.used' 2>&1)
+
+    API_GRAPHQL_REMAINING_SOURCE=$(echo "${API_RATE_LIMIT_SOURCE}" \
+    | jq -r '.resources.graphql.remaining' 2>&1)
+
+    echo ""
+    echo "=========================== SOURCE API RATE Limits ========================================"
+    echo "NOTE: Source migration mostly uses GraphQL API rate limits rather than core API rate limits"
+    echo "Your total core API  Rate limit for source PAT is: ${API_CORE_LIMIT_SOURCE}"
+    echo "Your used core API  Rate limit for source PAT is: ${API_CORE_USED_SOURCE}"
+    echo "Your remaining core API  Rate limit for source PAT is: ${API_CORE_REMAINING_SOURCE}"
+    echo ""
+    echo "Your total GraphQL API  Rate limit for source PAT is: ${API_GRAPHQL_LIMIT_SOURCE}"
+    echo "Your used GraphQL API  Rate limit for source PAT is: ${API_GRAPHQL_USED_SOURCE}"
+    echo "Your remaining GraphQL API  Rate limit for source PAT is: ${API_GRAPHQL_REMAINING_SOURCE}"
+
+    echo ""
+    echo "Now, we will check whether your source rate limit is about to run out and needs to refresh."
+    echo "Currently, we will go to sleep for $SLEEP seconds if your one of your remaining rate limits (GraphQL or core) is less than $MIN_RATELIMIT_GO2SLEEP"
+    echo "You can change the minimum required check by changing [MIN_RATELIMIT_GO2SLEEP] value"
+    echo ""
+    if [ "$API_CORE_REMAINING_SOURCE" -lt "$MIN_RATELIMIT_GO2SLEEP" ] || [ "$API_GRAPHQL_REMAINING_SOURCE" -lt "$MIN_RATELIMIT_GO2SLEEP" ]; then
+      Go2Sleep
+    fi
+  else
+    API_REMAINING_SOURCE=9999999999
+  fi
+
+  #########################
+  # Load the error code   #
+  #########################
+  ERROR_CODE=$?
+
+  ##############################
+  # Check the shell for errors #
+  ##############################
+  if [ "${ERROR_CODE}" -ne 0 ]; then
+    echo "ERROR! Failed to get valid response back from GitHub API!"
+    echo "ERROR:[${API_REMAINING_SOURCE}]"
+    exit 1
+  fi
+}
+
+#####################################################################
+##### Function CheckAPILimitDestination ########################################
+CheckAPILimitDestination() {
+ ##############################################################
+  # Check what is remaining in destination PAT, and if 0, we need to sleep it off #
+  ##############################################################
+  API_RATE_LIMIT_DEST=$(curl -s -X GET \
+  --url "${DEST_API_URL}/rate_limit" \
+  -H "Authorization: Bearer ${GH_TOKEN_DEST}" | jq -r '.' 2>&1)
+
+  # Check the presence whether of API Rate limiting is disabled (only for GHES):
+  API_REMAINING_MESSAGE_DEST=$(echo "${API_RATE_LIMIT_DEST}" \
+  | jq -r '.message' 2>&1)
+
+  if [[ "${API_REMAINING_MESSAGE_DEST}" != "Rate limiting is not enabled." ]]; then
+    API_REMAINING_DEST=$(echo "${API_RATE_LIMIT_DEST}" \
+    | jq -r '.resources.core.remaining' 2>&1)
+
+    API_TOTAL_DEST=$(echo "${API_RATE_LIMIT_DEST}" \
+    | jq -r '.resources.core.limit' 2>&1)
+    
+    API_USED_DEST=$(echo "${API_RATE_LIMIT_DEST}" \
+    | jq -r '.resources.core.used' 2>&1)
+
+    echo ""
+    echo "=========================== Destination API RATE Limits ======================================"
+    echo "Your total API  Rate limit for destination PAT is: ${API_TOTAL_DEST}"
+    echo "Your used API  Rate limit for destination PAT is: ${API_USED_DEST}"
+    echo "Your remaining API  Rate limit for destination PAT is: ${API_REMAINING_DEST}"
+
+    echo ""
+    echo "Now, we will check whether your destination rate limit is about to run out and needs to refresh."
+    echo "Currently, we will go to sleep for $SLEEP seconds if your one of your remaining rate limits (core) is less than $MIN_RATELIMIT_GO2SLEEP"
+    echo "You can change the minimum required check by changing [MIN_RATELIMIT_GO2SLEEP] value"
+    echo ""
+    if [ "$API_REMAINING_DEST" -lt "$MIN_RATELIMIT_GO2SLEEP" ]; then
+      Go2Sleep
+    fi
+  else
+    API_REMAINING_DEST=9999999999
+  fi
+
+  #########################
+  # Load the error code   #
+  #########################
+  ERROR_CODE=$?
+
+  ##############################
+  # Check the shell for errors #
+  ##############################
+  if [ "${ERROR_CODE}" -ne 0 ]; then
+    echo "ERROR! Failed to get valid response back from GitHub API!"
+    echo "ERROR:[${API_REMAINING_DEST}]"
+    exit 1
+  fi
+}
+
+################################################################
+##### Function Go2Sleep ########################################
+Go2Sleep() {
+  echo "WARN! We have run out of API calls and need to sleep!"
+  echo "Sleeping for ${SLEEP} seconds before next check"
+
+  COUNTER_SLEEP=0
+  sp="/-\|"
+
+  while [ "$COUNTER_SLEEP" -lt "$SLEEP" ]; do
+    printf "\b${sp:i++%${#sp}:1}"
+    sleep 1
+    COUNTER_SLEEP=$((COUNTER_SLEEP+1))
+  done
+
+  echo "Awesome. We are done waiting for ${SLEEP} seconds."
+}
+
+
+################################################################################
+#### Function GenerateFiles ####################################################
+GenerateFiles() {
+  echo ""
+  echo "#####################################################################################################"
+  echo "This will generate a file name that is going to be used to migrate repo permissions for collaborators"
+  echo "#####################################################################################################"
+
+  ##########################
+  # Get current date stamp #
+  ##########################
+  # Get datestring YYYYMMDDHHMM
+  DATE=$(date +%Y%m%d%H%M)
+
+  ####################
+  # Create File Name #
+  ####################
+  # Example: MyOrg-all_repos-201901041059.csv
+  OUTPUT_FILE_NAME="$DEST_ORG-all_repo-collaborators-$DATE.csv"
+
+  echo ""
+  echo "Your output file name: $OUTPUT_FILE_NAME"
+
+  #############################
+  # Create Header in the file #
+  #############################
+  echo ""
+  echo "Creating file header..."
+
+  # File format headers: 
+  echo "Org,Repo,Collaborator,Permission" >> "${OUTPUT_FILE_NAME}" 2>&1
+
+  #######################
+  # Load the error code #
+  #######################
+  ERROR_CODE=$?
+
+  ##############################
+  # Check the shell for errors #
+  ##############################
+  if [ ${ERROR_CODE} -ne 0 ]; then
+    echo "ERROR! Failed to write headers to file:[${OUTPUT_FILE_NAME}]!"
+    exit 1
+  fi
+
+  echo ""
+  echo "Done with creating a new output file named \"$OUTPUT_FILE_NAME\""
+}
+
+#####################################################################
+##### Function GetRepoCollaboratorPermission ########################################
+GetRepoCollaboratorPermission() {
+  echo ""
+  echo "######################################################"
+  echo "Getting the repo permissions from source organization"
+  echo "######################################################"
+
+  # Calculates required pages for Repositories. It will execute at least once:
+  REQUIRED_PAGES_REPOS=1
+
+  # Get the last cursor from Repository, so it can start after that cursor:
+  LAST_CURSOR_REPO=null
+  LAST_CURSOR_COLLAB=null
+
+  # Set counter for pages:
+  COUNTER_PAGINATION_REPOS=0
+
+   # START of checkTerminationConditionRepoLoop loop
+  while [ "$(checkTerminationConditionRepoLoop)" -gt 0 ]; do
+    echo ""
+    echo "Checking source API limit before an API call"
+    CheckAPILimitSource
+
+    # DEBUG MODE
+    if [ "$DEBUG" -eq 1 ]; then
+      echo "SOURCE GRAPHQL API URL: $SOURCE_GRAPHQL_API_URL REPO PAGINATION: $REPO_PAGINATION LAST CURSOR TEAM: $LAST_CURSOR_REPO COLLABORATOR PAGINATION: $COLLAB_PAGINATION LAST CURSOR REPO: $LAST_CURSOR_COLLAB" >> "$LOG_FILE_NAME"
+    fi
+
+    RESPONSE_REPOS=$(curl --request POST \
+    --url "$SOURCE_GRAPHQL_API_URL" \
+    --header "authorization: bearer $GH_TOKEN_SOURCE" \
+    --header "content-type: application/json" \
+    --data '{"query":"query(\n  $login: String!\n){\n  organization (login: $login)\n  {\n    login\n    id\n    name\n repositories (first: '"$REPO_PAGINATION"', after: '$LAST_CURSOR_REPO')\n {\n totalCount \n nodes\n{\n name \n collaborators(first: '"$COLLAB_PAGINATION"', after: '$LAST_CURSOR_COLLAB')\n {\n totalCount \n nodes{\n login \n }\n edges{\n permission \n cursor\n } \n} \n}\n edges{\n cursor \n} \n} }\n}","variables":{"login":"'"$SOURCE_ORG"'"}}' | jq -r '.data.organization.repositories' 2>&1)
+
+    # Print the rate limit after a Repository GraphQL call:
+    echo ""
+    echo "#####################################################################"
+    echo "Checking source rate limit after a GraphQL execution to get all Repositories"
+    echo "#####################################################################"
+    CheckAPILimitSource
+
+    # Total number of Repositories that need to be paginated:
+    TOTAL_REPOS_COUNTS=$(echo $RESPONSE_REPOS | jq -r '.totalCount')
+
+    # Only need to calcualte required pagination at the beginning
+    if [ "$COUNTER_PAGINATION_REPOS" -eq 0 ]; then
+        # DEBUG MODE
+        if [ "$DEBUG" -eq 1 ]; then
+          echo "REPO PAGINATION: $REPO_PAGINATION TOTAL REPO COUNTS: $TOTAL_REPOS_COUNTS"
+          echo "REPO PAGINATION: $REPO_PAGINATION TOTAL REPO COUNTS: $TOTAL_REPOS_COUNTS" >> "$LOG_FILE_NAME"
+        fi
+        
+        REQUIRED_PAGES_REPOS=$(calculateTotalPagination "$REPO_PAGINATION" "$TOTAL_REPOS_COUNTS")
+    fi
+
+    # Decrement required pages for repo:
+    REQUIRED_PAGES_REPOS=$((REQUIRED_PAGES_REPOS-1))
+
+    # For each collaborator page, we need to loop through:
+    COUNTER_REPO=0
+
+    # Total number of teams per page:
+    TOTAL_REPOS_PER_PAGE=$(echo $RESPONSE_REPOS | jq -r '.nodes' | jq length)
+
+    # START of looping through Repos:
+    while [ "$COUNTER_REPO" -lt "$TOTAL_REPOS_PER_PAGE" ]; do
+   
+         # Calculates required pages for collaborators. It will execute at least once:
+        REQUIRED_PAGES_COLLABS=1
+        # Get the last cursor from collaborator, so it can start after that cursor:
+        LAST_CURSOR_COLLAB=null
+
+        # For each collabor page, we need to iterate through repos:
+        COUNTER_PAGINATION_COLLABS=0
+
+        # START of checkTerminationConditionCollabLoop
+        while [ "$(checkTerminationConditionCollabLoop)" -gt 0 ]; do
+          RESPONSE_REPOS=$(curl --request POST \
+          --url "$SOURCE_GRAPHQL_API_URL" \
+          --header "authorization: bearer $GH_TOKEN_SOURCE" \
+          --header "content-type: application/json" \
+          --data '{"query":"query(\n  $login: String!\n){\n  organization (login: $login)\n  {\n    login\n    id\n    name\n repositories (first: '"$REPO_PAGINATION"', after: '$LAST_CURSOR_REPO')\n {\n totalCount \n nodes\n{\n name \n collaborators(first: '"$COLLAB_PAGINATION"', after: '$LAST_CURSOR_COLLAB')\n {\n totalCount \n nodes{\n login \n }\n edges{\n permission \n cursor\n } \n} \n}\n edges{\n cursor \n} \n} }\n}","variables":{"login":"'"$SOURCE_ORG"'"}}' | jq -r '.data.organization.repositories' 2>&1)
+
+            # Print the rate limit after a repo GraphQL call:
+            echo ""
+            echo "#####################################################################"
+            echo "Checking source rate limit after a GraphQL execution to get all repos"
+            echo "#####################################################################"
+            CheckAPILimitSource
+
+            # List of stuffs in a selected Repository:
+            LIST_REPO_OBJECTS=$(echo $RESPONSE_REPOS | jq -r ".nodes[$COUNTER_REPO]")
+            # Get the current Repo name:
+            CURRENT_REPO_NAME=$(echo $LIST_REPO_OBJECTS | jq -r '.name')
+            # Get the list of collaboratoros in a Repository:
+            LIST_COLLABS4REPO=$(echo $LIST_REPO_OBJECTS | jq -r '.collaborators')
+            # Total number of collaborators that require pagination:
+            TOTAL_COLLABS_COUNTS=$(echo $LIST_COLLABS4REPO | jq -r '.totalCount')
+            
+            # Only need to calculate required pagination at the beginning
+            if [ "$COUNTER_PAGINATION_COLLABS" -eq 0 ]; then
+              # DEBUG MODE
+              if [ "$DEBUG" -eq 1 ]; then
+                  echo "COLLAB PAGINATION: $COLLAB_PAGINATION TOTAL COLLABS COUNTS: $TOTAL_COLLABS_COUNTS" >> "$LOG_FILE_NAME"
+              fi
+              REQUIRED_PAGES_COLLABS=$(calculateTotalPagination "$COLLAB_PAGINATION" "$TOTAL_COLLABS_COUNTS")
+            fi
+
+            # Decrement required pages for collaborator:
+            REQUIRED_PAGES_COLLABS=$((REQUIRED_PAGES_COLLABS-1))
+               
+            # Need to get total number of collaborators to loop through for this page:
+            COLLABS_COUNTS_PER_PAGE=$(echo $LIST_COLLABS4REPO | jq -r '.nodes' | jq length)
+
+            # For each collaborator page, we need to loop through:
+            COUNTER_COLLABS=0
+
+            # START of looping through collaborators:
+            while [ "$COUNTER_COLLABS" -lt "$COLLABS_COUNTS_PER_PAGE" ]; do
+              # GET the current collaborator name:
+              CURRENT_COLLAB_NAME=$(echo $LIST_COLLABS4REPO | jq -r ".nodes[$COUNTER_COLLABS].login")
+              # GET the current collaboraor permission:
+              CURRENT_COLLAB_PERMISSION=$(echo $LIST_COLLABS4REPO | jq -r ".edges[$COUNTER_COLLABS].permission")
+
+              if [ "$DEBUG" -eq 1 ]; then
+                echo "DEST ORG: $DEST_ORG Current Repo Name: $CURRENT_REPO_NAME CURRENT COLLABORATOR NAME: $CURRENT_COLLAB_NAME CURRENT_COLLAB_PERMISSION: $CURRENT_COLLAB_PERMISSION" >> "$LOG_FILE_NAME"
+              fi
+
+              # WRITE to output file
+              echo "${DEST_ORG},${CURRENT_REPO_NAME},${CURRENT_COLLAB_NAME},$(calculate_permission "$CURRENT_COLLAB_PERMISSION")" >> "$OUTPUT_FILE_NAME"
+
+
+              # Increment counter for collaborator:
+              COUNTER_COLLABS=$((COUNTER_COLLABS+1))
+            done
+            # END of looping through collaborators:
+
+            # Change null pointer only after first run:
+            if [ "$REQUIRED_PAGES_COLLABS" -gt 0 ]; then
+                LAST_CURSOR_COLLAB=$(echo  $LIST_COLLABS4REPO | jq -r ".edges[$COLLABS_COUNTS_PER_PAGE-1].cursor")
+                LAST_CURSOR_COLLAB='\"'$LAST_CURSOR_COLLAB'\"'
+            fi
+
+            COUNTER_PAGINATION_COLLABS=$((COUNTER_PAGINATION_COLLABS+1))
+        done
+        # END of checkTerminationConditionCollabLoop
+        
+        COUNTER_REPO=$((COUNTER_REPO+1))
+    done
+    # END of looping through Repositories
+
+    LENGTH_NODE_REPOS=$(echo $RESPONSE_REPOS | jq -r '.nodes' | jq length)
+    LAST_CURSOR_REPO=$(echo  $RESPONSE_REPOS | jq -r ".edges[$LENGTH_NODE_REPOS-1].cursor")
+    LAST_CURSOR_REPO='\"'$LAST_CURSOR_REPO'\"'
+
+    COUNTER_PAGINATION_REPOS=$((COUNTER_PAGINATION_REPOS+1))
+  done 
+  # END of checkTerminationConditionRepoLoop loop
+}
+
+
+#####################################################################
+#### Function Header ################################################
+Header() {
+
+  GraphicArt
+  if [ "$DEBUG" -eq 1 ]; then
+     GenerateLogFile
+  fi;
+
+  AskForPhase
+
+  if [[ "${CONFIRM_CREATING_MIGRATION_FILE}" == 'y' ]]; then
+    AskForPagination
+  fi;
+
+  if [[ "${CONFIRM_CREATING_MIGRATION_FILE}" == 'y' ]]; then
+    GetGHEURLSource
+  fi;
+  GetGHEURLDestination
+
+  if [[ "${CONFIRM_CREATING_MIGRATION_FILE}" == 'y' ]]; then
+    GetPersonalAccessTokenSource
+  fi;
+
+  GetPersonalAccessTokenDestination
+
+  if [[ "${CONFIRM_CREATING_MIGRATION_FILE}" == 'y' ]]; then
+    GetOrganizations
+  fi;
+
+  # Print the rate limit at the beginning of script execution:
+  echo ""
+  echo "######################################################"
+  echo "Your rate limit before the script execution"
+  echo "######################################################"
+
+  if [[ "${CONFIRM_CREATING_MIGRATION_FILE}" == 'y' ]]; then
+    CheckAPILimitSource
+  fi;
+
+  CheckAPILimitDestination
+}
+
+###########
+# Defaults #
+############
+REPO_PAGINATION=100
+COLLAB_PAGINATION=100
+
+SOURCE_URL=${SOURCE_URL:-}
+SOURCE_API_URL=${SOURCE_API_URL:-}
+SOURCE_GRAPHQL_API_URL=${SOURCE_GRAPHQL_API_URL:-}
+
+DEST_URL=${DEST_URL:-}
+DEST_API_URL=${DEST_API_URL:-}
+
+GH_TOKEN_SOURCE=${GH_TOKEN_SOURCE:-}
+GH_TOKEN_DEST=${GH_TOKEN_DEST:-}
+
+SOURCE_ORG=${SOURCE_ORG:-}
+DEST_ORG=${DEST_ORG:-}
+
+MIN_RATELIMIT_GO2SLEEP=10
+
+SLEEP='3600'
+
+OUTPUT_FILE_NAME=
+
+# SET DEBUG FLAG. BY DEFAULT, it is on:
+DEBUG=1
+
+##########
+# HEADER #
+##########
+Header
+
+#####################################################################
+######################## MAIN #######################################
+#####################################################################
+
+if [[ "${CONFIRM_CREATING_MIGRATION_FILE}" == 'y' ]]; then
+  GenerateFiles
+  GetRepoCollaboratorPermission
+fi;
