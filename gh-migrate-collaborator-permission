@@ -311,7 +311,7 @@ GetGHEURLSource() {
      #######################################
      echo ""
      echo "------------------------------------"
-     echo "Is your source oranization in GHES?"
+     echo "Is your source organization in GHES?"
      echo "Type [y] for yes and [n] for no."
      echo "Followed with the [Enter] key."
      ########################
@@ -377,7 +377,7 @@ GetGHEURLDestination() {
      #######################################
      echo ""
      echo "------------------------------------"
-     echo "Is your destination oranization in GHES?"
+     echo "Is your destination organization in GHES?"
      echo "Type [y] for yes and [n] for no."
      echo "Followed with the [Enter] key."
      ########################
@@ -553,6 +553,43 @@ GetOrganizations() {
       exit 1
     fi
   fi
+
+  
+  ###################################################
+  # Check whether destination organization is EMU #
+  #################################################
+     echo ""
+     echo "------------------------------------"
+     echo "Is your destination organization is GHEC-EMU? Usernames of EMU have unique syntax of [USERNAME_ENTERPRISENAME]"
+     echo "If it is, this program will ask for enterprise name and append [_ENTERPRISENAME] to all of your importable usernames/collaborators"
+     echo "WARNING: This also means that all usernames of your source organization have to exactly match all usernames of destination organization"
+     echo "Type [y] for yes if destination organization is EMU and you want to append enterprise name [n] for no."
+     echo "Followed with the [Enter] key."
+     ########################
+     # Read input from user #
+     #######################
+     read -r CONFIRM_DESTINATION_ORG_EMU
+
+     if [[ "${CONFIRM_DESTINATION_ORG_EMU}" == 'y' ]]; then
+       CONFIRM_CORRECT_ENTERPRISE_NAME_DESTINATION_EMU="n"
+
+       while [ "${CONFIRM_CORRECT_ENTERPRISE_NAME_DESTINATION_EMU}" != "y" ]; do
+         echo "Please type in your destination organization's enterprise name"
+         echo "Followed with the [Enter] key."
+         read -r DESTINATION_ENTERPRISE_NAME_EMU
+
+         echo "DESTINATION ENTERPRISE NAME:[${DESTINATION_ENTERPRISE_NAME_EMU}]"
+         echo "Is your DESTINATION ENTERPRISE NAME to migrate to correct?"
+         echo "Type [y] for yes and [n] for no."
+         echo "Followed with the [Enter] key."
+
+         read -r CONFIRM_CORRECT_ENTERPRISE_NAME_DESTINATION_EMU
+        done
+       
+       echo "Alright. I will use enterprise name [$DESTINATION_ENTERPRISE_NAME_EMU] and append to end of destination organization's usernames"
+    else
+       echo "Okay. Your destination organization is not EMU, so I will proceed as it is"
+    fi
 }
 
 #####################################################################
@@ -786,7 +823,9 @@ GetRepoCollaboratorPermission() {
     --url "$SOURCE_GRAPHQL_API_URL" \
     --header "authorization: bearer $GH_TOKEN_SOURCE" \
     --header "content-type: application/json" \
-    --data '{"query":"query(\n  $login: String!\n){\n  organization (login: $login)\n  {\n    login\n    id\n    name\n repositories (first: '"$REPO_PAGINATION"', after: '$LAST_CURSOR_REPO')\n {\n totalCount \n nodes\n{\n name \n collaborators(first: '"$COLLAB_PAGINATION"', after: '$LAST_CURSOR_COLLAB')\n {\n totalCount \n nodes{\n login \n }\n edges{\n permission \n cursor\n } \n} \n}\n edges{\n cursor \n} \n} }\n}","variables":{"login":"'"$SOURCE_ORG"'"}}' | jq -r '.data.organization.repositories' 2>&1)
+    --data '{"query":"query(\n  $login: String!\n){\n  organization (login: $login)\n  {\n    login\n    id\n    name\n repositories (first: '"$REPO_PAGINATION"', after: '$LAST_CURSOR_REPO')\n {\n totalCount \n nodes\n{\n name \n collaborators(first: '"$COLLAB_PAGINATION"', after: '"$LAST_CURSOR_COLLAB"' , affiliation:DIRECT)\n {\n totalCount \n nodes{\n login \n }\n edges{\n permission \n cursor\n } \n} \n}\n edges{\n cursor \n} \n} }\n}","variables":{"login":"'"$SOURCE_ORG"'"}}' | jq -r '.data.organization.repositories' 2>&1)
+
+    #echo "RESPONSE REPOS 1st: $RESPONSE_REPOS"
 
     # Print the rate limit after a Repository GraphQL call:
     echo ""
@@ -835,8 +874,10 @@ GetRepoCollaboratorPermission() {
           --url "$SOURCE_GRAPHQL_API_URL" \
           --header "authorization: bearer $GH_TOKEN_SOURCE" \
           --header "content-type: application/json" \
-          --data '{"query":"query(\n  $login: String!\n){\n  organization (login: $login)\n  {\n    login\n    id\n    name\n repositories (first: '"$REPO_PAGINATION"', after: '$LAST_CURSOR_REPO')\n {\n totalCount \n nodes\n{\n name \n collaborators(first: '"$COLLAB_PAGINATION"', after: '$LAST_CURSOR_COLLAB')\n {\n totalCount \n nodes{\n login \n }\n edges{\n permission \n cursor\n } \n} \n}\n edges{\n cursor \n} \n} }\n}","variables":{"login":"'"$SOURCE_ORG"'"}}' | jq -r '.data.organization.repositories' 2>&1)
+          --data '{"query":"query(\n  $login: String!\n){\n  organization (login: $login)\n  {\n    login\n    id\n    name\n repositories (first: '"$REPO_PAGINATION"', after: '$LAST_CURSOR_REPO')\n {\n totalCount \n nodes\n{\n name \n collaborators(first: '"$COLLAB_PAGINATION"',  after: '"$LAST_CURSOR_COLLAB"' , affiliation:DIRECT)\n {\n totalCount \n nodes{\n login \n }\n edges{\n permission \n cursor\n } \n} \n}\n edges{\n cursor \n} \n} }\n}","variables":{"login":"'"$SOURCE_ORG"'"}}' | jq -r '.data.organization.repositories' 2>&1)
 
+
+            #echo "RESPONSE REPOS 2nd: $RESPONSE_REPOS"
             # Print the rate limit after a repo GraphQL call:
             echo ""
             echo "#####################################################################"
@@ -875,6 +916,11 @@ GetRepoCollaboratorPermission() {
             while [ "$COUNTER_COLLABS" -lt "$COLLABS_COUNTS_PER_PAGE" ]; do
               # GET the current collaborator name:
               CURRENT_COLLAB_NAME=$(echo $LIST_COLLABS4REPO | jq -r ".nodes[$COUNTER_COLLABS].login")
+
+              # APPEND _ENTERPRISE if destination organization is EMU:
+              if [[ "${CONFIRM_DESTINATION_ORG_EMU}" == 'y' ]]; then
+                CURRENT_COLLAB_NAME="${CURRENT_COLLAB_NAME}_${DESTINATION_ENTERPRISE_NAME_EMU}"
+              fi
               # GET the current collaboraor permission:
               CURRENT_COLLAB_PERMISSION=$(echo $LIST_COLLABS4REPO | jq -r ".edges[$COUNTER_COLLABS].permission")
 
@@ -912,6 +958,90 @@ GetRepoCollaboratorPermission() {
     COUNTER_PAGINATION_REPOS=$((COUNTER_PAGINATION_REPOS+1))
   done 
   # END of checkTerminationConditionRepoLoop loop
+}
+
+#####################################################################
+##### Function ProceedMigration ########################################
+ProceedMigration() {
+  echo ""
+  echo "######################################################################################"
+  echo "This will proceed with migration by getting an input file"
+  echo "######################################################################################"
+
+  INPUT_FILE_NAME=
+  CONFIRM_EXISTING_FILE="n"
+
+  if [[ ${OUTPUT_FILE_NAME} ]]; then
+    echo ""
+    echo "I found a file named \"${OUTPUT_FILE_NAME}\""
+    echo ""
+    echo "Is this the file name you wants to start with migration process?"
+    echo "Type [y] if you want to use  \"${OUTPUT_FILE_NAME}\" as the input file for migration process or [n] if you want to enter something different"
+    echo "Followed with the [Enter] key."
+
+    read -r CONFIRM_EXISTING_FILE
+
+    if [[ "${CONFIRM_EXISTING_FILE}" == 'y' ]]; then
+      echo ""
+      echo "Great! I will use \"${OUTPUT_FILE_NAME}\" as the input file"
+      INPUT_FILE_NAME=$OUTPUT_FILE_NAME
+    fi;
+  fi;
+
+  if [[ -z ${OUTPUT_FILE_NAME} ]] || [[ "${CONFIRM_EXISTING_FILE}" == 'n' ]]; then
+    CONFIRM_INPUT_FILE="n"
+
+    while [ "${CONFIRM_INPUT_FILE}" != "y" ]; do
+      echo ""
+      echo "Please type in the input file name that you want to use (e.g. sss.csv)"
+      echo "Followed with the [Enter] key."
+      read -r INPUT_FILE_NAME
+
+      echo "Input File Name:[${INPUT_FILE_NAME}]"
+      echo "Is your input file name that contains the migration correct?"
+      echo "Type [y] for yes and [n] for no."
+      echo "Followed with the [Enter] key."
+
+      read -r CONFIRM_INPUT_FILE
+
+    done
+  fi
+
+  echo "Alright. We will proceed with migration"
+
+  IFS=','
+  COUNTER=0
+
+  while read -r line;
+    do
+
+    echo ""
+    echo "Checking destination API limit before an API call"
+    CheckAPILimitDestination
+
+    if [ "$COUNTER" -gt 0 ]; then
+      read -a result_array <<< "$line"
+
+      ORG_MIGRATION="${result_array[0]}"
+      REPO_MIGRATION="${result_array[1]}"
+      COLLABORATOR_MIGRATION="${result_array[2]}"
+      PERMISSION_MIGRATION="${result_array[3]}"
+
+      echo "ORG MIGRATION: $ORG_MIGRATION REPO MIGRATION: $REPO_MIGRATION COLLABORATOR MIGRATION: $COLLABORATOR_MIGRATION PERMISSION MIGRATION: $PERMISSION_MIGRATION"
+      
+      curl -X PUT \
+      -H "Accept: application/vnd.github.v3+json" \
+      -H "Authorization: token $GH_TOKEN_DEST" \
+      "$DEST_API_URL"/repos/"$ORG_MIGRATION"/"$REPO_MIGRATION"/collaborators/"$COLLABORATOR_MIGRATION" \
+      -d "{\"permission\":\"$PERMISSION_MIGRATION\"}"
+
+      echo ""
+      echo "Checking destination API limit after an API call"
+      CheckAPILimitDestination
+    fi;
+    COUNTER=$((COUNTER + 1))
+
+   done < "${INPUT_FILE_NAME}"
 }
 
 
@@ -999,3 +1129,5 @@ if [[ "${CONFIRM_CREATING_MIGRATION_FILE}" == 'y' ]]; then
   GenerateFiles
   GetRepoCollaboratorPermission
 fi;
+
+ProceedMigration
