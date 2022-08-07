@@ -68,7 +68,7 @@ Make sure you followed prerequisites and then follow these instructions.
 gh extension install mona-actions/gh-migrate-collaborator-permission
 ```
 
-### Step 2: Run gh migrate-team-permission
+### Step 2: Run gh migrate-collaborator-permission
 
 ```sh
   gh migrate-collaborator-permission -su https://ghes-url.com -st ABCDEFG1234567 -so source-org -do final-destination-org -dt ABCDEFG1234567
