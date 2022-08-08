@@ -121,7 +121,7 @@ done
 GraphicArt() {
   echo ""
   echo "##############################################################"
-  echo "         GitHub Team Repo Permission Migration                "
+  echo "         GitHub Repository Collaborator Permission Migration  "
   cat << "EOF"
 .------------------------------------------------------------------------------.
 |                             .mmMMMMMMMMMMMMMmm.                              |
